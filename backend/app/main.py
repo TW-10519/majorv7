@@ -12,8 +12,8 @@ from calendar import monthrange
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete, and_, or_, func
-from sqlalchemy.orm import selectinload
+from sqlalchemy import select, delete, and_, or_, func, Float
+from sqlalchemy.orm import selectinload, with_loader_criteria
 from datetime import datetime, timedelta, date
 from typing import List, Dict, Optional
 from collections import defaultdict
@@ -682,10 +682,15 @@ async def create_employee(
     if manager_record and emp_data.department_id != manager_record.department_id:
         raise HTTPException(status_code=403, detail="Can only create employees in your department")
     
+    # Check if employee with this email already exists
+    existing = await db.execute(select(Employee).filter(Employee.email == emp_data.email))
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail=f"Employee with email {emp_data.email} already exists")
+
     # Generate numeric employee ID by extracting numbers from existing IDs
     result = await db.execute(select(Employee.employee_id))
     employee_ids = result.scalars().all()
-    
+
     # Extract numeric parts from IDs like "EMP001", "EMP002", etc.
     max_num = 0
     for emp_id in employee_ids:
@@ -696,9 +701,9 @@ async def create_employee(
                     max_num = num
             except ValueError:
                 pass
-    
+
     new_employee_id = f"EMP{str(max_num + 1).zfill(3)}"  # Format as EMP001, EMP002, etc.
-    
+
     # Create employee without user_id (optional)
     emp_dict = emp_data.dict(exclude={'password'})
     emp_dict['employee_id'] = new_employee_id
@@ -737,35 +742,37 @@ async def create_employee(
 @app.get("/employees", response_model=List[EmployeeResponse])
 async def list_employees(
     current_user: User = Depends(get_current_active_user),
+    show_inactive: bool = False,  # Query parameter to show inactive employees
     db: AsyncSession = Depends(get_db)
 ):
+    filters = []
+
     if current_user.user_type == UserType.ADMIN:
-        result = await db.execute(select(Employee).filter(Employee.is_active == True))
+        # Admin sees all employees in their departments
+        if not show_inactive:
+            filters.append(Employee.is_active == True)
+        result = await db.execute(select(Employee).filter(*filters) if filters else select(Employee))
     elif current_user.user_type == UserType.MANAGER:
         # Get manager's department from Manager table
         manager_result = await db.execute(select(Manager).filter(Manager.user_id == current_user.id))
         manager = manager_result.scalar_one_or_none()
-        
+
         if manager:
-            result = await db.execute(
-                select(Employee).filter(
-                    Employee.department_id == manager.department_id,
-                    Employee.is_active == True
-                )
-            )
+            filters.append(Employee.department_id == manager.department_id)
+            if not show_inactive:
+                filters.append(Employee.is_active == True)
+            result = await db.execute(select(Employee).filter(*filters))
         else:
             # No manager record, return empty list
             result = await db.execute(
                 select(Employee).filter(Employee.id == -1)  # Returns empty
             )
     else:  # Employee
-        result = await db.execute(
-            select(Employee).filter(
-                Employee.user_id == current_user.id,
-                Employee.is_active == True
-            )
-        )
-    
+        if not show_inactive:
+            filters.append(Employee.is_active == True)
+        filters.append(Employee.user_id == current_user.id)
+        result = await db.execute(select(Employee).filter(*filters))
+
     return result.scalars().all()
 
 
@@ -833,24 +840,41 @@ async def update_employee(
 @app.delete("/employees/{employee_id}")
 async def delete_employee(
     employee_id: int,
+    hard_delete: bool = False,
     current_user: User = Depends(require_manager),
     db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(select(Employee).filter(Employee.id == employee_id))
     employee = result.scalar_one_or_none()
-    
+
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
-    
+
     if current_user.user_type == UserType.MANAGER:
         manager_dept = await get_manager_department(current_user, db)
         if not manager_dept or employee.department_id != manager_dept:
             raise HTTPException(status_code=403, detail="Can only delete employees in your department")
-    
-    employee.is_active = False
-    await db.commit()
-    
-    return {"message": "Employee deleted successfully"}
+
+    # Get associated user if exists
+    user = None
+    if employee.user_id:
+        user_result = await db.execute(select(User).filter(User.id == employee.user_id))
+        user = user_result.scalar_one_or_none()
+
+    if hard_delete:
+        # Permanent deletion from database - delete both employee and user
+        if user:
+            await db.delete(user)
+        await db.delete(employee)
+        await db.commit()
+        return {"message": "Employee and associated user permanently deleted"}
+    else:
+        # Soft delete - mark both as inactive
+        employee.is_active = False
+        if user:
+            user.is_active = False
+        await db.commit()
+        return {"message": "Employee deleted successfully"}
 
 
 # Roles
@@ -875,24 +899,29 @@ async def create_role(
     return role
 
 
-@app.get("/roles", response_model=List[RoleResponse])
+@app.get("/roles", response_model=List[RoleDetailResponse])
 async def list_roles(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db)
 ):
+    """List all roles with their shifts (eager loaded)"""
+    stmt = select(Role).options(
+        selectinload(Role.shifts),
+        with_loader_criteria(Shift, Shift.is_active == True)
+    )
+
     if current_user.user_type == UserType.ADMIN:
-        result = await db.execute(select(Role).filter(Role.is_active == True))
+        stmt = stmt.filter(Role.is_active == True)
     else:
         # For managers, use get_manager_department helper
         manager_dept = await get_manager_department(current_user, db)
-        result = await db.execute(
-            select(Role).filter(
-                Role.department_id == manager_dept,
-                Role.is_active == True
-            )
+        stmt = stmt.filter(
+            Role.department_id == manager_dept,
+            Role.is_active == True
         )
 
-    return result.scalars().all()
+    result = await db.execute(stmt)
+    return result.scalars().unique().all()
 
 
 @app.get("/roles/{role_id}", response_model=RoleDetailResponse)
@@ -902,26 +931,16 @@ async def get_role_detail(
     db: AsyncSession = Depends(get_db)
 ):
     """Get role with all shifts"""
-    from sqlalchemy.orm import selectinload
+    stmt = select(Role).options(
+        selectinload(Role.shifts),
+        with_loader_criteria(Shift, Shift.is_active == True)
+    ).filter(Role.id == role_id, Role.is_active == True)
 
-    if current_user.user_type == UserType.ADMIN:
-        result = await db.execute(
-            select(Role)
-            .options(selectinload(Role.shifts))
-            .filter(Role.id == role_id, Role.is_active == True)
-        )
-    else:
+    if current_user.user_type != UserType.ADMIN:
         manager_dept = await get_manager_department(current_user, db)
-        result = await db.execute(
-            select(Role)
-            .options(selectinload(Role.shifts))
-            .filter(
-                Role.id == role_id,
-                Role.department_id == manager_dept,
-                Role.is_active == True
-            )
-        )
+        stmt = stmt.filter(Role.department_id == manager_dept)
 
+    result = await db.execute(stmt)
     role = result.scalar_one_or_none()
     if not role:
         raise HTTPException(status_code=404, detail="Role not found")
@@ -982,10 +1001,21 @@ async def delete_role(
     if role.department_id != manager_dept:
         raise HTTPException(status_code=403, detail="Can only delete roles in your department")
     
+    # Mark associated shifts as inactive so they disappear from role management views
+    shift_result = await db.execute(
+        select(Shift).filter(
+            Shift.role_id == role_id,
+            Shift.is_active == True
+        )
+    )
+    role_shifts = shift_result.scalars().all()
+    for shift in role_shifts:
+        shift.is_active = False
+    
     role.is_active = False
     await db.commit()
     
-    return {"message": "Role deleted successfully"}
+    return {"message": "Role and associated shifts deleted successfully"}
 
 # Helper functions to resolve department ownership
 async def get_user_department(user: User, db: AsyncSession) -> Optional[int]:
@@ -1886,8 +1916,8 @@ async def get_schedules(
     db: AsyncSession = Depends(get_db)
 ):
     query = select(Schedule).options(
-        selectinload(Schedule.user_type),
-        selectinload(Schedule.employee).selectinload(Employee.user)
+        selectinload(Schedule.employee).selectinload(Employee.user),
+        selectinload(Schedule.role)
     )
 
     if current_user.user_type == UserType.EMPLOYEE:
@@ -1948,9 +1978,14 @@ async def create_schedule(
 
     db.add(schedule)
     await db.commit()
-    await db.refresh(schedule)
 
-    return schedule
+    # Refresh with eager loading
+    result = await db.execute(
+        select(Schedule)
+        .filter(Schedule.id == schedule.id)
+        .options(selectinload(Schedule.role))
+    )
+    return result.scalar_one()
 
 
 @app.put("/schedules/{schedule_id}", response_model=ScheduleResponse)
@@ -1972,13 +2007,21 @@ async def update_schedule(
             raise HTTPException(status_code=403, detail="Can only edit schedules in your department")
 
     for key, value in schedule_data.dict(exclude_unset=True).items():
+        # Convert string date to date object if needed
+        if key == 'date' and isinstance(value, str):
+            value = datetime.strptime(value, '%Y-%m-%d').date()
         setattr(schedule, key, value)
 
     schedule.updated_at = datetime.utcnow()
     await db.commit()
-    await db.refresh(schedule)
 
-    return schedule
+    # Re-fetch with eager loading
+    result = await db.execute(
+        select(Schedule)
+        .filter(Schedule.id == schedule_id)
+        .options(selectinload(Schedule.role))
+    )
+    return result.scalar_one()
 
 
 @app.delete("/schedules/{schedule_id}")
@@ -2012,28 +2055,257 @@ async def generate_schedules(
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Generate optimized schedules using priority-based distribution with OR-Tools.
-    
+    Generate fair schedules with equal shift distribution.
+
     Algorithm:
-    1. Calculates total shifts per role (minus leaves)
-    2. Distributes by priority percentage to each shift type
-    3. Distributes across days based on day priorities
-    4. Assigns employees with equal share of shift types
+    1. Get all roles and shifts for the department in the date range
+    2. Get all employees in the department
+    3. Calculate each employee's capacity (shifts per week)
+    4. Fairly assign shifts equally across different shift types
+    5. Respect min_emp and max_emp constraints for each shift
     """
     try:
         print(f"[DEBUG] Schedule generation started for dates {start_date} to {end_date}", flush=True)
-        
+
         # Get manager's department
         department_id = await get_manager_department(current_user, db)
-        
-        # For now, just return success to fix the 400 error
-        # Full implementation to be added later
+        if not department_id:
+            raise HTTPException(status_code=400, detail="Manager department not found")
+
+        print(f"[DEBUG] Department ID: {department_id}", flush=True)
+
+        # Get all roles in this department
+        roles_result = await db.execute(
+            select(Role)
+            .filter(Role.department_id == department_id, Role.is_active == True)
+        )
+        roles = roles_result.scalars().all()
+        print(f"[DEBUG] Found {len(roles)} roles", flush=True)
+
+        if not roles:
+            return {
+                "success": True,
+                "schedules_created": 0,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "feedback": ["❌ No active roles found in your department. Create roles first."],
+                "schedules": []
+            }
+
+        # Get all shifts for these roles
+        role_ids = [r.id for r in roles]
+        shifts_result = await db.execute(
+            select(Shift)
+            .filter(Shift.role_id.in_(role_ids), Shift.is_active == True)
+        )
+        shifts = shifts_result.scalars().all()
+        print(f"[DEBUG] Found {len(shifts)} shifts", flush=True)
+
+        # Log shift details
+        for shift in shifts:
+            print(f"[DEBUG] Shift: {shift.id} - {shift.name}, active={shift.is_active}, time={shift.start_time}-{shift.end_time}, min_emp={shift.min_emp}, role_id={shift.role_id}", flush=True)
+
+        if not shifts:
+            return {
+                "success": True,
+                "schedules_created": 0,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "feedback": ["❌ No active shifts found in your roles. Create shifts first."],
+                "schedules": []
+            }
+
+        # Get all employees in the department
+        employees_result = await db.execute(
+            select(Employee)
+            .filter(Employee.department_id == department_id, Employee.is_active == True)
+        )
+        employees = employees_result.scalars().all()
+        print(f"[DEBUG] Found {len(employees)} employees", flush=True)
+
+        # Log employee details
+        for emp in employees:
+            print(f"[DEBUG] Employee: {emp.id} - {emp.first_name}, active={emp.is_active}, weekly_hours={emp.weekly_hours}, daily_max={emp.daily_max_hours}, shifts_per_week={emp.shifts_per_week}", flush=True)
+
+        if not employees:
+            return {
+                "success": True,
+                "schedules_created": 0,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "feedback": ["❌ No active employees found in your department. Create employees first."],
+                "schedules": []
+            }
+
+        # Generate date range (one schedule per shift per day)
+        current_date = start_date
+        schedules_created = 0
+        feedback = []
+
+        # Group shifts by role for fair distribution
+        shifts_by_role = defaultdict(list)
+        for shift in shifts:
+            shifts_by_role[shift.role_id].append(shift)
+
+        # Calculate employee capacity and pre-assign shifts
+        shift_assignments = defaultdict(lambda: defaultdict(int))  # {shift_id: {emp_id: count}}
+
+        # For each shift, distribute based on employee capacity
+        for shift in shifts:
+            # Distribute this shift across employees based on capacity
+            for emp in employees:
+                # Only assign employees who are either:
+                # 1. Not assigned to any specific role (flexible), OR
+                # 2. Assigned to this shift's role
+                if emp.role_id is not None and emp.role_id != shift.role_id:
+                    continue  # Skip employees not assigned to this role
+
+                # Calculate employee capacity for this week
+                weekly_hours = emp.weekly_hours or 40
+                daily_max = emp.daily_max_hours or 8
+                shifts_per_week = emp.shifts_per_week or 5
+
+                # Max shifts this employee can work per week (most limiting factor)
+                max_capacity = min(shifts_per_week, int(weekly_hours / daily_max))
+
+                # Simply assign the full capacity for each shift they're eligible for
+                # The actual schedule creation loop will handle the distribution
+                shift_assignments[shift.id][emp.id] = max_capacity
+                print(f"[DEBUG] Assigned {emp.id} ({emp.first_name}) to shift {shift.id} with capacity {max_capacity}", flush=True)
+
+        # Create schedules
+        current_date = start_date
+        while current_date <= end_date:
+            day_name = current_date.strftime('%A').lower()
+
+            for shift in shifts:
+                # Check if shift operates on this day
+                role = next((r for r in roles if r.id == shift.role_id), None)
+                print(f"[DEBUG] Processing shift {shift.id} on {current_date} ({day_name}), role schedule_config: {role.schedule_config if role else 'N/A'}", flush=True)
+
+                # Check if role has schedule_config - if yes, only process enabled days
+                # If no schedule_config, assume all days are enabled
+                should_skip = False
+                if role and role.schedule_config and isinstance(role.schedule_config, dict) and len(role.schedule_config) > 0:
+                    # Role has a schedule_config, so only process days that are explicitly enabled
+                    if not role.schedule_config.get(day_name, False):
+                        should_skip = True
+                        print(f"[DEBUG] ✗ Day {day_name} is disabled for role {role.id}, skipping", flush=True)
+
+                if should_skip:
+                    continue
+                else:
+                    print(f"[DEBUG] ✓ Processing day {day_name} for role {role.id if role else 'N/A'}", flush=True)
+
+                # Assign employees to this shift on this day
+                assigned_count = 0
+                for emp in employees:
+                    if (shift.id in shift_assignments and
+                        emp.id in shift_assignments[shift.id] and
+                        shift_assignments[shift.id][emp.id] > 0):
+                        print(f"[DEBUG] Checking {emp.first_name} for shift {shift.id} on {current_date}, remaining: {shift_assignments[shift.id][emp.id]}", flush=True)
+
+                        # Check if employee has leave or is unavailable
+                        leave_result = await db.execute(
+                            select(LeaveRequest)
+                            .filter(
+                                LeaveRequest.employee_id == emp.id,
+                                LeaveRequest.start_date <= current_date,
+                                LeaveRequest.end_date >= current_date,
+                                LeaveRequest.status == LeaveStatus.APPROVED
+                            )
+                        )
+                        if leave_result.scalar_one_or_none():
+                            continue  # Skip if employee is on leave
+
+                        # Check if employee exceeded weekly hours limit
+                        week_start = current_date - timedelta(days=current_date.weekday())
+                        week_end = week_start + timedelta(days=6)
+
+                        # Fetch existing schedules for the week (with eager loading of role)
+                        existing_schedules_result = await db.execute(
+                            select(Schedule)
+                            .filter(
+                                Schedule.employee_id == emp.id,
+                                Schedule.date >= week_start,
+                                Schedule.date <= week_end
+                            )
+                            .options(selectinload(Schedule.role))
+                        )
+                        existing_schedules = existing_schedules_result.scalars().all()
+
+                        # Calculate existing hours in Python, subtracting break time
+                        existing_hours = 0
+                        existing_hours_today = 0
+                        for sched in existing_schedules:
+                            if sched.start_time and sched.end_time:
+                                try:
+                                    start = datetime.strptime(sched.start_time, '%H:%M')
+                                    end = datetime.strptime(sched.end_time, '%H:%M')
+                                    total_hours = (end - start).total_seconds() / 3600
+
+                                    # Subtract break time from role
+                                    break_hours = (sched.role.break_minutes or 0) / 60 if sched.role else 0
+                                    work_hours = total_hours - break_hours
+
+                                    existing_hours += work_hours
+                                    # Check hours for current day
+                                    if sched.date == current_date:
+                                        existing_hours_today += work_hours
+                                except (ValueError, TypeError):
+                                    pass
+
+                        # Calculate shift hours (total time) and work hours (minus breaks)
+                        shift_start = datetime.strptime(shift.start_time, '%H:%M')
+                        shift_end = datetime.strptime(shift.end_time, '%H:%M')
+                        total_shift_hours = (shift_end - shift_start).total_seconds() / 3600
+
+                        # Subtract break time from role
+                        break_hours = (role.break_minutes or 0) / 60
+                        work_hours = total_shift_hours - break_hours
+
+                        # Check both weekly and daily limits using work hours (excluding breaks)
+                        daily_max = emp.daily_max_hours or 8
+                        print(f"[DEBUG] Hours check: existing_weekly={existing_hours:.1f} + work={work_hours:.1f} <= {emp.weekly_hours} AND existing_daily={existing_hours_today:.1f} + work={work_hours:.1f} <= {daily_max}", flush=True)
+
+                        if (existing_hours + work_hours <= emp.weekly_hours and
+                            existing_hours_today + work_hours <= daily_max):
+                            print(f"[DEBUG] ✓ Creating schedule for {emp.first_name} on {current_date}", flush=True)
+                            # Create schedule
+                            schedule = Schedule(
+                                department_id=department_id,
+                                employee_id=emp.id,
+                                role_id=shift.role_id,
+                                shift_id=shift.id,
+                                date=current_date,
+                                start_time=shift.start_time,
+                                end_time=shift.end_time,
+                                status="scheduled"
+                            )
+                            db.add(schedule)
+                            schedules_created += 1
+                            assigned_count += 1
+                            shift_assignments[shift.id][emp.id] -= 1
+
+                            if assigned_count >= shift.max_emp:
+                                break  # Max employees for this shift on this day
+
+                # Ensure minimum employees are assigned
+                if assigned_count < shift.min_emp:
+                    feedback.append(f"Warning: {shift.name} on {current_date} has {assigned_count} employees (min: {shift.min_emp})")
+
+            current_date += timedelta(days=1)
+
+        await db.commit()
+
+        feedback.insert(0, f"Successfully generated {schedules_created} schedules")
+
         return {
             "success": True,
-            "schedules_created": 0,
+            "schedules_created": schedules_created,
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
-            "feedback": ["Schedule generation stub - full implementation coming soon"],
+            "feedback": feedback,
             "schedules": []
         }
     except HTTPException:
@@ -2533,35 +2805,28 @@ async def create_shift(
 @app.get("/shifts", response_model=List[ShiftResponse])
 async def list_shifts(
     role_id: int = None,
+    include_inactive: bool = False,
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db)
 ):
     """List shifts for a role or department (manager)"""
-    from app.models import Shift
-    
+    query = select(Shift)
+
+    if role_id:
+        query = query.filter(Shift.role_id == role_id)
+
+    if not include_inactive:
+        query = query.filter(Shift.is_active == True)
+
     if current_user.user_type == UserType.MANAGER:
         manager_dept = await get_manager_department(current_user, db)
         if not manager_dept:
             raise HTTPException(status_code=403, detail="Not authorized")
-        if role_id:
-            # Verify role belongs to manager's department
-            result = await db.execute(select(Role).filter(Role.id == role_id, Role.department_id == manager_dept))
-            role = result.scalar_one_or_none()
-            if not role:
-                raise HTTPException(status_code=404, detail="Role not found")
-            
-            result = await db.execute(select(Shift).filter(Shift.role_id == role_id, Shift.is_active == True))
-        else:
-            # Get all shifts for roles in manager's department
-            result = await db.execute(
-                select(Shift)
-                .join(Role)
-                .filter(Role.department_id == manager_dept, Shift.is_active == True)
-            )
-    else:
-        # Admin sees all
-        result = await db.execute(select(Shift).filter(Shift.is_active == True))
-    
+        query = query.join(Role).filter(Role.department_id == manager_dept)
+    elif current_user.user_type != UserType.ADMIN:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    result = await db.execute(query.order_by(Shift.created_at.desc()))
     shifts = result.scalars().all()
     return shifts
 
@@ -2606,14 +2871,14 @@ async def update_shift(
 @app.delete("/shifts/{shift_id}")
 async def delete_shift(
     shift_id: int,
+    hard_delete: bool = False,
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Delete a shift (manager only)"""
+    """Delete a shift (manager only). Supports soft delete by default with optional permanent delete."""
     if current_user.user_type not in [UserType.ADMIN, UserType.MANAGER]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    from app.models import Shift
     result = await db.execute(select(Shift).filter(Shift.id == shift_id))
     shift = result.scalar_one_or_none()
     
@@ -2628,6 +2893,14 @@ async def delete_shift(
         manager_dept = await get_manager_department(current_user, db)
         if not manager_dept or role.department_id != manager_dept:
             raise HTTPException(status_code=403, detail="Not authorized")
+    
+    if hard_delete:
+        await db.delete(shift)
+        await db.commit()
+        return {"detail": "Shift permanently deleted"}
+    
+    if not shift.is_active:
+        return {"detail": "Shift already inactive"}
     
     shift.is_active = False
     await db.commit()

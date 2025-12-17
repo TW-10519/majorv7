@@ -374,12 +374,16 @@ class ScheduleCreate(BaseModel):
 class ScheduleUpdate(BaseModel):
     employee_id: Optional[int] = None
     role_id: Optional[int] = None
-    date: Optional[date] = None
+    date: Optional[str] = None  # Accept string, will be converted
     start_time: Optional[str] = None
     end_time: Optional[str] = None
     shift_id: Optional[int] = None
     status: Optional[str] = None
     notes: Optional[str] = None
+
+    class Config:
+        # Allow coercion of data types
+        str_strip_whitespace = True
 
 
 class ScheduleResponse(BaseModel):

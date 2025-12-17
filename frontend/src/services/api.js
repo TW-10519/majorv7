@@ -87,9 +87,12 @@ export const deleteDepartment = (id) => api.delete(`/departments/${id}`);
 
 // Employees
 export const createEmployee = (empData) => api.post('/employees', empData);
-export const listEmployees = () => api.get('/employees');
+export const listEmployees = (showInactive = false) => api.get('/employees', { params: { show_inactive: showInactive } });
 export const updateEmployee = (id, empData) => api.put(`/employees/${id}`, empData);
-export const deleteEmployee = (id) => api.delete(`/employees/${id}`);
+export const deleteEmployee = (id, hardDelete = false) =>
+  api.delete(`/employees/${id}`, {
+    params: hardDelete ? { hard_delete: true } : {}
+  });
 
 // Roles
 export const createRole = (roleData) => api.post('/roles', roleData);
@@ -129,13 +132,17 @@ export const deleteUnavailability = (id) => api.delete(`/unavailability/${id}`);
 
 // Shifts
 export const createShift = (shiftData) => api.post('/shifts', shiftData);
-export const listShifts = (roleId = null) => {
-  const params = new URLSearchParams();
-  if (roleId) params.append('role_id', roleId);
-  return api.get(`/shifts?${params.toString()}`);
+export const listShifts = (roleId = null, includeInactive = false) => {
+  const params = {};
+  if (roleId) params.role_id = roleId;
+  if (includeInactive) params.include_inactive = true;
+  return api.get('/shifts', { params });
 };
 export const updateShift = (id, shiftData) => api.put(`/shifts/${id}`, shiftData);
-export const deleteShift = (id) => api.delete(`/shifts/${id}`);
+export const deleteShift = (id, hardDelete = false) =>
+  api.delete(`/shifts/${id}`, {
+    params: hardDelete ? { hard_delete: true } : {}
+  });
 
 // Messages
 export const sendMessage = (messageData) => api.post('/messages', messageData);

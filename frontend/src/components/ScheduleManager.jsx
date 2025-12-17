@@ -1,385 +1,508 @@
 import React, { useState, useEffect } from 'react';
-import { Calendar, Plus, Edit2, Trash2, Check, X, Clock, AlertCircle, Download } from 'lucide-react';
+import { Calendar, Plus, Edit2, Trash2, Check, X, Clock, AlertCircle, ChevronLeft, ChevronRight } from 'lucide-react';
 import Card from './common/Card';
 import Button from './common/Button';
 import Modal from './common/Modal';
-import Table from './common/Table';
 import { getSchedules, createSchedule, updateSchedule, deleteSchedule, generateSchedule } from '../services/api';
+import api from '../services/api';
 
 const ScheduleManager = ({ departmentId, employees = [], roles = [] }) => {
+  // View/Edit Mode
+  const [viewMode, setViewMode] = useState('view');
   const [schedules, setSchedules] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [showForm, setShowForm] = useState(false);
-  const [editingSchedule, setEditingSchedule] = useState(null);
-  const [startDate, setStartDate] = useState(new Date().toISOString().split('T')[0]);
-  const [endDate, setEndDate] = useState(
-    new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
-  );
-  const [generatingSchedule, setGeneratingSchedule] = useState(false);
-  const [showGenerateDialog, setShowGenerateDialog] = useState(false);
+  const [currentWeekStart, setCurrentWeekStart] = useState(getMonday(new Date()));
 
-  const [formData, setFormData] = useState({
-    employee_id: '',
-    role_id: '',
-    date: '',
-    start_time: '09:00',
-    end_time: '17:00',
-    notes: ''
-  });
+  // Modals
+  const [showWeekPicker, setShowWeekPicker] = useState(false);
+  const [showDetailModal, setShowDetailModal] = useState(false);
+  const [selectedSchedule, setSelectedSchedule] = useState(null);
+  const [selectedWeek, setSelectedWeek] = useState(getMonday(new Date()));
 
+  // Edit mode state
+  const [editedSchedules, setEditedSchedules] = useState([]);
+  const [draggedSchedule, setDraggedSchedule] = useState(null);
+  const [editingScheduleId, setEditingScheduleId] = useState(null);
+  const [editingTimes, setEditingTimes] = useState(null);
+
+  // Error/Success
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+
+  // Get Monday of week
+  function getMonday(date) {
+    const d = new Date(date);
+    const day = d.getDay();
+    const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+    return new Date(d.setDate(diff)).toISOString().split('T')[0];
+  }
+
+  // Get week dates
+  function getWeekDates(mondayDate) {
+    const dates = [];
+    const start = new Date(mondayDate);
+    for (let i = 0; i < 7; i++) {
+      const date = new Date(start);
+      date.setDate(date.getDate() + i);
+      dates.push(date.toISOString().split('T')[0]);
+    }
+    return dates;
+  }
+
+  // Load schedules
   useEffect(() => {
-    loadSchedules();
-  }, [startDate, endDate]);
+    loadSchedulesForWeek();
+  }, [currentWeekStart, viewMode]);
 
-  const loadSchedules = async () => {
+  const loadSchedulesForWeek = async () => {
     setLoading(true);
     try {
+      const weekDates = getWeekDates(currentWeekStart);
+      const startDate = weekDates[0];
+      const endDate = weekDates[6];
       const response = await getSchedules(startDate, endDate);
       setSchedules(response.data || []);
+      setEditedSchedules(JSON.parse(JSON.stringify(response.data || [])));
     } catch (error) {
       console.error('Failed to load schedules:', error);
+      setError('Failed to load schedules');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleSaveSchedule = async () => {
-    if (!formData.employee_id || !formData.role_id || !formData.date) {
-      alert('Please fill all required fields');
-      return;
-    }
-
-    try {
-      if (editingSchedule) {
-        await updateSchedule(editingSchedule.id, formData);
-        alert('Schedule updated successfully');
-      } else {
-        await createSchedule(formData);
-        alert('Schedule created successfully');
-      }
-      resetForm();
-      loadSchedules();
-    } catch (error) {
-      alert('Error saving schedule: ' + error.message);
-    }
-  };
-
-  const handleDeleteSchedule = async (id) => {
-    if (window.confirm('Delete this schedule?')) {
-      try {
-        await deleteSchedule(id);
-        alert('Schedule deleted successfully');
-        loadSchedules();
-      } catch (error) {
-        alert('Error deleting schedule: ' + error.message);
-      }
-    }
-  };
-
   const handleGenerateSchedule = async () => {
-    setGeneratingSchedule(true);
+    setLoading(true);
     try {
+      const weekDates = getWeekDates(selectedWeek);
+      const startDate = weekDates[0];
+      const endDate = weekDates[6];
+
+      console.log('Generating schedules for', startDate, 'to', endDate);
       const response = await generateSchedule(startDate, endDate);
-      if (response.data.success) {
-        alert(`✅ Schedule generated! Created ${response.data.schedules_created} assignments`);
-        setShowGenerateDialog(false);
-        loadSchedules();
+      console.log('Generation response:', response);
+
+      // Show feedback from backend
+      const scheduleCount = response.data?.schedules_created || 0;
+      const feedback = response.data?.feedback || [];
+
+      if (scheduleCount > 0) {
+        setSuccess(`✅ Generated ${scheduleCount} schedules!\n${feedback.join('\n')}`);
       } else {
-        alert('Schedule generation failed: ' + response.data.error);
+        setError(`⚠️ No schedules generated.\n${feedback.join('\n')}`);
       }
+
+      setTimeout(() => {
+        setSuccess('');
+        setError('');
+      }, 5000);
+
+      setShowWeekPicker(false);
+      setCurrentWeekStart(selectedWeek);
+
+      // Wait a moment then reload
+      setTimeout(() => loadSchedulesForWeek(), 500);
     } catch (error) {
-      alert('Error generating schedule: ' + error.message);
+      console.error('Generation error:', error);
+      setError('Failed to generate schedule: ' + (error.response?.data?.detail || error.message));
+      setTimeout(() => setError(''), 3000);
     } finally {
-      setGeneratingSchedule(false);
+      setLoading(false);
     }
   };
 
-  const resetForm = () => {
-    setFormData({
-      employee_id: '',
-      role_id: '',
-      date: '',
+  const handleAddSchedule = () => {
+    const newSchedule = {
+      id: `new-${Date.now()}`,
+      employee_id: employees[0]?.id || '',
+      role_id: roles[0]?.id || '',
+      date: getWeekDates(currentWeekStart)[0],
       start_time: '09:00',
       end_time: '17:00',
-      notes: ''
-    });
-    setEditingSchedule(null);
-    setShowForm(false);
+      shift_id: null,
+      status: 'scheduled',
+      isNew: true
+    };
+    setEditedSchedules([...editedSchedules, newSchedule]);
   };
 
-  const handleEditSchedule = (schedule) => {
-    setEditingSchedule(schedule);
-    setFormData({
-      employee_id: schedule.employee_id,
-      role_id: schedule.role_id,
-      date: schedule.date,
-      start_time: schedule.start_time || '09:00',
-      end_time: schedule.end_time || '17:00',
-      notes: schedule.notes || ''
-    });
-    setShowForm(true);
+  const handleDeleteScheduleEdit = (scheduleId) => {
+    setEditedSchedules(editedSchedules.filter(s => s.id !== scheduleId));
   };
 
-  const scheduleColumns = [
-    { header: 'Date', accessor: 'date' },
-    { 
-      header: 'Employee', 
-      accessor: row => {
-        const emp = employees.find(e => e.id === row.employee_id);
-        return emp ? `${emp.first_name} ${emp.last_name}` : 'N/A';
-      }
-    },
-    { 
-      header: 'Role', 
-      accessor: row => {
-        const role = roles.find(r => r.id === row.role_id);
-        return role ? role.name : 'N/A';
-      }
-    },
-    { header: 'Time', accessor: row => `${row.start_time} - ${row.end_time}` },
-    { header: 'Status', accessor: 'status' },
-    {
-      header: 'Actions',
-      accessor: row => (
-        <div className="flex gap-2">
-          <button
-            onClick={() => handleEditSchedule(row)}
-            className="text-blue-600 hover:text-blue-800 p-1"
-            title="Edit"
-          >
-            <Edit2 size={16} />
-          </button>
-          <button
-            onClick={() => handleDeleteSchedule(row.id)}
-            className="text-red-600 hover:text-red-800 p-1"
-            title="Delete"
-          >
-            <Trash2 size={16} />
-          </button>
-        </div>
-      )
+  const handleEditTimes = (schedule) => {
+    setEditingScheduleId(schedule.id);
+    setEditingTimes({ ...schedule });
+  };
+
+  const handleSaveTimes = () => {
+    if (editingTimes) {
+      setEditedSchedules(editedSchedules.map(s =>
+        s.id === editingTimes.id
+          ? { ...s, start_time: editingTimes.start_time, end_time: editingTimes.end_time }
+          : s
+      ));
     }
-  ];
+    setEditingScheduleId(null);
+    setEditingTimes(null);
+  };
+
+  const handleConfirmChanges = async () => {
+    setLoading(true);
+    try {
+      // Delete old schedules
+      const deleteTasks = schedules
+        .filter(s => !editedSchedules.find(e => e.id === s.id))
+        .map(s => deleteSchedule(s.id));
+
+      // Create new schedules
+      const createTasks = editedSchedules
+        .filter(s => s.isNew)
+        .map(s => createSchedule({
+          employee_id: s.employee_id,
+          role_id: s.role_id,
+          date: s.date,
+          start_time: s.start_time,
+          end_time: s.end_time,
+          shift_id: s.shift_id
+        }));
+
+      // Update existing
+      const updateTasks = editedSchedules
+        .filter(s => !s.isNew && schedules.find(orig => orig.id === s.id))
+        .map(s => updateSchedule(s.id, {
+          employee_id: s.employee_id,
+          role_id: s.role_id,
+          date: s.date,
+          start_time: s.start_time,
+          end_time: s.end_time,
+          shift_id: s.shift_id
+        }));
+
+      await Promise.all([...deleteTasks, ...createTasks, ...updateTasks]);
+
+      setSuccess('✅ Schedule changes saved!');
+      setTimeout(() => setSuccess(''), 3000);
+      setViewMode('view');
+      await loadSchedulesForWeek();
+    } catch (error) {
+      setError('Failed to save schedule: ' + (error.response?.data?.detail || error.message));
+      setTimeout(() => setError(''), 3000);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const getEmployeeName = (empId) => {
+    const emp = employees.find(e => e.id === empId);
+    return emp ? `${emp.first_name} ${emp.last_name}` : 'Unknown';
+  };
+
+  const getRoleName = (roleId) => {
+    const role = roles.find(r => r.id === roleId);
+    return role?.name || 'Unknown';
+  };
+
+  const getRoleColor = (roleId) => {
+    const colors = [
+      'bg-blue-100 text-blue-900',
+      'bg-purple-100 text-purple-900',
+      'bg-pink-100 text-pink-900',
+      'bg-green-100 text-green-900',
+      'bg-yellow-100 text-yellow-900',
+      'bg-indigo-100 text-indigo-900'
+    ];
+    return colors[roleId % colors.length];
+  };
+
+  const weekDates = getWeekDates(currentWeekStart);
+  const displaySchedules = viewMode === 'edit' ? editedSchedules : schedules;
+
+  const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+  const handlePreviousWeek = () => {
+    setCurrentWeekStart(getMonday(new Date(currentWeekStart).getTime() - 7 * 24 * 60 * 60 * 1000));
+  };
+
+  const handleNextWeek = () => {
+    setCurrentWeekStart(getMonday(new Date(currentWeekStart).getTime() + 7 * 24 * 60 * 60 * 1000));
+  };
 
   return (
-    <div className="space-y-6">
-      {/* Schedule Generator Dialog */}
-      <Modal isOpen={showGenerateDialog} onClose={() => setShowGenerateDialog(false)}>
-        <div className="bg-white rounded-lg shadow-lg p-6 max-w-2xl">
-          <h2 className="text-2xl font-bold mb-4">Generate Optimized Schedule</h2>
-          <div className="space-y-4 mb-6">
-            <p className="text-gray-600">
-              This will automatically generate an optimized schedule using OR-Tools constraint solver.
-              The algorithm distributes shifts based on:
-            </p>
-            <ul className="list-disc list-inside text-gray-600 space-y-1">
-              <li>Employee skills and preferences</li>
-              <li>Role requirements</li>
-              <li>Employee availability and leave requests</li>
-              <li>Weekly hour constraints</li>
-              <li>Fair distribution of shift types</li>
-            </ul>
-
-            <div className="bg-blue-50 border border-blue-200 rounded p-4">
-              <p className="text-sm text-blue-800">
-                <strong>Period:</strong> {startDate} to {endDate}
-              </p>
-            </div>
-          </div>
-          <div className="flex gap-3 justify-end">
-            <Button onClick={() => setShowGenerateDialog(false)} variant="secondary">Cancel</Button>
-            <Button 
-              onClick={handleGenerateSchedule} 
-              disabled={generatingSchedule}
-              className="flex items-center gap-2"
-            >
-              {generatingSchedule ? 'Generating...' : <>
-                <Sparkles size={18} />
-                Generate Schedule
-              </>}
-            </Button>
-          </div>
+    <div>
+      {error && (
+        <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg flex items-start">
+          <AlertCircle className="w-5 h-5 text-red-500 mr-3 flex-shrink-0 mt-0.5" />
+          <span className="text-sm text-red-700 whitespace-pre-wrap">{error}</span>
         </div>
-      </Modal>
+      )}
+      {success && (
+        <div className="mb-4 p-4 bg-green-50 border border-green-200 rounded-lg flex items-start">
+          <Check className="w-5 h-5 text-green-500 mr-3 flex-shrink-0 mt-0.5" />
+          <span className="text-sm text-green-700 whitespace-pre-wrap">{success}</span>
+        </div>
+      )}
 
-      {/* Schedule Form Modal */}
-      <Modal isOpen={showForm} onClose={resetForm}>
-        <div className="bg-white rounded-lg shadow-lg p-6 max-w-md">
-          <h2 className="text-xl font-bold mb-4">
-            {editingSchedule ? 'Edit Schedule' : 'Create Schedule'}
-          </h2>
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700">Employee *</label>
-              <select
-                value={formData.employee_id}
-                onChange={(e) => setFormData({...formData, employee_id: e.target.value})}
-                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-2"
-              >
-                <option value="">Select employee</option>
-                {employees.map(emp => (
-                  <option key={emp.id} value={emp.id}>
-                    {emp.first_name} {emp.last_name}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700">Role *</label>
-              <select
-                value={formData.role_id}
-                onChange={(e) => setFormData({...formData, role_id: e.target.value})}
-                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-2"
-              >
-                <option value="">Select role</option>
-                {roles.map(role => (
-                  <option key={role.id} value={role.id}>
-                    {role.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700">Date *</label>
-              <input
-                type="date"
-                value={formData.date}
-                onChange={(e) => setFormData({...formData, date: e.target.value})}
-                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-2"
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700">Start Time</label>
-                <input
-                  type="time"
-                  value={formData.start_time}
-                  onChange={(e) => setFormData({...formData, start_time: e.target.value})}
-                  className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-2"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700">End Time</label>
-                <input
-                  type="time"
-                  value={formData.end_time}
-                  onChange={(e) => setFormData({...formData, end_time: e.target.value})}
-                  className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-2"
-                />
+      <Card
+        title="Schedule Management"
+        subtitle={`Week of ${weekDates[0]} to ${weekDates[6]}`}
+        headerAction={
+          viewMode === 'view' ? (
+            <div className="flex gap-2 items-center">
+              <button onClick={handlePreviousWeek} className="p-2 hover:bg-gray-100 rounded">
+                <ChevronLeft className="w-5 h-5" />
+              </button>
+              <span className="text-sm font-medium min-w-[200px] text-center">{weekDates[0]} to {weekDates[6]}</span>
+              <button onClick={handleNextWeek} className="p-2 hover:bg-gray-100 rounded">
+                <ChevronRight className="w-5 h-5" />
+              </button>
+              <div className="border-l pl-2 ml-2 flex gap-2">
+                <Button onClick={() => setShowWeekPicker(true)} variant="primary">
+                  <Calendar className="w-4 h-4 mr-2 inline" />
+                  Generate
+                </Button>
+                <Button onClick={() => setViewMode('edit')} variant="secondary">
+                  <Edit2 className="w-4 h-4 mr-2 inline" />
+                  Edit
+                </Button>
               </div>
             </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700">Notes</label>
-              <textarea
-                value={formData.notes}
-                onChange={(e) => setFormData({...formData, notes: e.target.value})}
-                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-2"
-                rows="3"
-                placeholder="Optional notes"
-              />
+          ) : (
+            <div className="flex gap-2">
+              <Button onClick={handleAddSchedule} variant="secondary">
+                <Plus className="w-4 h-4 mr-2 inline" />
+                Add Shift
+              </Button>
+              <Button onClick={handleConfirmChanges} variant="primary">
+                <Check className="w-4 h-4 mr-2 inline" />
+                Confirm & Save
+              </Button>
+              <Button
+                onClick={() => {
+                  setViewMode('view');
+                  setEditedSchedules(JSON.parse(JSON.stringify(schedules)));
+                }}
+                variant="ghost"
+              >
+                <X className="w-4 h-4 mr-2 inline" />
+                Cancel
+              </Button>
             </div>
-          </div>
-
-          <div className="flex gap-3 justify-end mt-6">
-            <Button onClick={resetForm} variant="secondary">Cancel</Button>
-            <Button onClick={handleSaveSchedule}>
-              {editingSchedule ? 'Update' : 'Create'} Schedule
-            </Button>
-          </div>
-        </div>
-      </Modal>
-
-      {/* Header with controls */}
-      <Card>
-        <div className="flex justify-between items-center mb-4">
-          <div className="flex items-center gap-4">
-            <Calendar size={24} className="text-blue-600" />
-            <h2 className="text-2xl font-bold">Schedule Management</h2>
-          </div>
-          <div className="flex gap-2">
-            <Button onClick={() => setShowGenerateDialog(true)} variant="primary" className="flex items-center gap-2">
-              <Sparkles size={18} />
-              Auto-Generate
-            </Button>
-            <Button onClick={() => setShowForm(true)} className="flex items-center gap-2">
-              <Plus size={18} />
-              Add Schedule
-            </Button>
-          </div>
-        </div>
-
-        {/* Date range selector */}
-        <div className="flex gap-4 items-end">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">From</label>
-            <input
-              type="date"
-              value={startDate}
-              onChange={(e) => setStartDate(e.target.value)}
-              className="border border-gray-300 rounded-md shadow-sm p-2"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">To</label>
-            <input
-              type="date"
-              value={endDate}
-              onChange={(e) => setEndDate(e.target.value)}
-              className="border border-gray-300 rounded-md shadow-sm p-2"
-            />
-          </div>
-        </div>
-      </Card>
-
-      {/* Schedules Table */}
-      <Card>
+          )
+        }
+      >
         {loading ? (
-          <div className="text-center py-8 text-gray-500">Loading schedules...</div>
-        ) : schedules.length === 0 ? (
-          <div className="text-center py-8 text-gray-500">
-            <AlertCircle className="inline mb-2 text-gray-400" size={40} />
-            <p>No schedules found for the selected period</p>
-          </div>
+          <div className="p-12 text-center text-gray-500">Loading schedules...</div>
         ) : (
-          <Table
-            data={schedules}
-            columns={scheduleColumns}
-            striped
-          />
+          <div className="overflow-x-auto">
+            <div className="min-w-max">
+              {/* Header with days */}
+              <div className="grid gap-0 border border-gray-300 rounded-lg overflow-hidden" style={{ gridTemplateColumns: '250px repeat(7, 1fr)' }}>
+                <div className="bg-gray-900 text-white p-4 font-bold">Employee / Role</div>
+                {weekDates.map((date, idx) => {
+                  const d = new Date(date);
+                  const dayNum = d.getDate();
+                  return (
+                    <div key={date} className="bg-gray-100 p-3 border-l border-gray-300 font-bold text-sm text-center">
+                      <div className="text-gray-600">{dayNames[idx]}</div>
+                      <div className="text-lg text-gray-900">{dayNum}</div>
+                    </div>
+                  );
+                })}
+
+                {/* Employee rows */}
+                {employees.map((emp) => (
+                  <React.Fragment key={emp.id}>
+                    <div className="bg-white border-b border-t border-gray-300 p-3 font-semibold text-sm flex flex-col justify-center sticky left-0 z-10 bg-gray-50">
+                      <div className="text-gray-900">{emp.first_name} {emp.last_name}</div>
+                      {emp.role_id && (
+                        <div className={`text-xs mt-1 px-2 py-1 rounded w-fit ${getRoleColor(emp.role_id)}`}>
+                          {getRoleName(emp.role_id)}
+                        </div>
+                      )}
+                    </div>
+
+                    {weekDates.map((date) => {
+                      const daySchedules = displaySchedules.filter(
+                        s => s.employee_id === emp.id && s.date === date
+                      );
+
+                      return (
+                        <div
+                          key={`${emp.id}-${date}`}
+                          className="bg-white border-b border-l border-gray-300 p-2 min-h-[120px] relative hover:bg-gray-50 transition"
+                          onDragOver={(e) => viewMode === 'edit' && e.preventDefault()}
+                          onDrop={(e) => {
+                            if (viewMode === 'edit' && draggedSchedule) {
+                              setEditedSchedules(editedSchedules.map(s =>
+                                s.id === draggedSchedule.id
+                                  ? { ...s, employee_id: emp.id, date }
+                                  : s
+                              ));
+                              setDraggedSchedule(null);
+                            }
+                          }}
+                        >
+                          {daySchedules.map((sched) => (
+                            <div
+                              key={sched.id}
+                              draggable={viewMode === 'edit'}
+                              onDragStart={() => viewMode === 'edit' && setDraggedSchedule(sched)}
+                              onDragEnd={() => setDraggedSchedule(null)}
+                              onClick={() => viewMode === 'view' && (setSelectedSchedule(sched), setShowDetailModal(true))}
+                              className={`
+                                p-2 rounded mb-1 text-xs font-semibold cursor-pointer
+                                transition-all border-l-4
+                                ${getRoleColor(sched.role_id)}
+                                ${viewMode === 'edit' ? 'cursor-move hover:shadow-lg' : 'hover:shadow-md'}
+                              `}
+                              style={{ borderLeftColor: '#1e40af' }}
+                            >
+                              {editingScheduleId === sched.id ? (
+                                <div className="space-y-1">
+                                  <input
+                                    type="time"
+                                    value={editingTimes.start_time}
+                                    onChange={(e) => setEditingTimes({ ...editingTimes, start_time: e.target.value })}
+                                    className="w-full px-1 py-0.5 border rounded text-xs"
+                                  />
+                                  <input
+                                    type="time"
+                                    value={editingTimes.end_time}
+                                    onChange={(e) => setEditingTimes({ ...editingTimes, end_time: e.target.value })}
+                                    className="w-full px-1 py-0.5 border rounded text-xs"
+                                  />
+                                  <div className="flex gap-1">
+                                    <button
+                                      onClick={handleSaveTimes}
+                                      className="flex-1 bg-green-500 text-white px-1 py-0.5 rounded text-xs hover:bg-green-600"
+                                    >
+                                      Save
+                                    </button>
+                                    <button
+                                      onClick={() => {
+                                        setEditingScheduleId(null);
+                                        setEditingTimes(null);
+                                      }}
+                                      className="flex-1 bg-gray-400 text-white px-1 py-0.5 rounded text-xs hover:bg-gray-500"
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div>
+                                  <div className="font-bold">{sched.start_time} - {sched.end_time}</div>
+                                  <div className="text-xs opacity-75 mt-0.5">{getRoleName(sched.role_id)}</div>
+                                  {viewMode === 'edit' && (
+                                    <div className="flex gap-1 mt-1">
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleEditTimes(sched);
+                                        }}
+                                        className="text-blue-600 hover:text-blue-800"
+                                        title="Edit times"
+                                      >
+                                        <Clock className="w-3 h-3" />
+                                      </button>
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleDeleteScheduleEdit(sched.id);
+                                        }}
+                                        className="text-red-600 hover:text-red-800"
+                                        title="Delete shift"
+                                      >
+                                        <Trash2 className="w-3 h-3" />
+                                      </button>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })}
+                  </React.Fragment>
+                ))}
+              </div>
+            </div>
+          </div>
         )}
       </Card>
 
-      {/* Schedule Stats */}
-      {schedules.length > 0 && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <Card>
-            <div className="text-center">
-              <p className="text-gray-600 text-sm mb-2">Total Schedules</p>
-              <p className="text-3xl font-bold text-blue-600">{schedules.length}</p>
-            </div>
-          </Card>
-          <Card>
-            <div className="text-center">
-              <p className="text-gray-600 text-sm mb-2">Unique Employees</p>
-              <p className="text-3xl font-bold text-green-600">
-                {new Set(schedules.map(s => s.employee_id)).size}
-              </p>
-            </div>
-          </Card>
-          <Card>
-            <div className="text-center">
-              <p className="text-gray-600 text-sm mb-2">Average Shifts/Employee</p>
-              <p className="text-3xl font-bold text-purple-600">
-                {(schedules.length / new Set(schedules.map(s => s.employee_id)).size).toFixed(1)}
-              </p>
-            </div>
-          </Card>
+      {/* Week Picker Modal */}
+      <Modal
+        isOpen={showWeekPicker}
+        onClose={() => setShowWeekPicker(false)}
+        title="Generate Schedule"
+      >
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Select Week to Generate
+            </label>
+            <input
+              type="date"
+              value={selectedWeek}
+              onChange={(e) => setSelectedWeek(getMonday(new Date(e.target.value)))}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+            />
+            <p className="text-xs text-gray-500 mt-2">
+              Week: {getWeekDates(selectedWeek)[0]} to {getWeekDates(selectedWeek)[6]}
+            </p>
+          </div>
+          <div className="flex gap-2 justify-end">
+            <Button onClick={() => setShowWeekPicker(false)} variant="ghost">
+              Cancel
+            </Button>
+            <Button onClick={handleGenerateSchedule} variant="primary" disabled={loading}>
+              {loading ? 'Generating...' : 'Generate'}
+            </Button>
+          </div>
         </div>
-      )}
+      </Modal>
+
+      {/* Detail Modal */}
+      <Modal
+        isOpen={showDetailModal}
+        onClose={() => setShowDetailModal(false)}
+        title="Schedule Details"
+      >
+        {selectedSchedule && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="text-sm text-gray-600">Employee</label>
+                <p className="font-semibold">{getEmployeeName(selectedSchedule.employee_id)}</p>
+              </div>
+              <div>
+                <label className="text-sm text-gray-600">Role</label>
+                <p className="font-semibold">{getRoleName(selectedSchedule.role_id)}</p>
+              </div>
+              <div>
+                <label className="text-sm text-gray-600">Date</label>
+                <p className="font-semibold">{selectedSchedule.date}</p>
+              </div>
+              <div>
+                <label className="text-sm text-gray-600">Time</label>
+                <p className="font-semibold">{selectedSchedule.start_time} - {selectedSchedule.end_time}</p>
+              </div>
+              <div className="col-span-2">
+                <label className="text-sm text-gray-600">Status</label>
+                <p className="font-semibold capitalize">{selectedSchedule.status}</p>
+              </div>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <Button onClick={() => setShowDetailModal(false)} variant="primary">
+                Close
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 };

@@ -265,14 +265,31 @@ const RoleManagement = () => {
                         <div className="text-xs text-purple-600 font-semibold">Distribution</div>
                         <div className="text-sm font-bold text-purple-900">{role.priority_percentage || role.priority}%</div>
                       </div>
-                      <div className="bg-green-50 rounded p-2">
-                        <div className="text-xs text-green-600 font-semibold">Shift Duration</div>
-                        <div className="text-sm font-bold text-green-900">{role.shift_duration_hours || '8'} hrs</div>
-                      </div>
-                      <div className="bg-orange-50 rounded p-2">
-                        <div className="text-xs text-orange-600 font-semibold">Break Time</div>
-                        <div className="text-sm font-bold text-orange-900">{(role.break_minutes / 60).toFixed(1)} hrs</div>
-                      </div>
+                      {(() => {
+                        // Calculate shift duration from start_time and end_time
+                        const [startH, startM] = (role.start_time || '09:00').split(':').map(Number);
+                        const [endH, endM] = (role.end_time || '17:00').split(':').map(Number);
+                        const totalHours = (endH + endM / 60) - (startH + startM / 60);
+                        const breakHours = (role.break_minutes || 0) / 60;
+                        const workHours = totalHours - breakHours;
+
+                        return (
+                          <>
+                            <div className="bg-blue-50 rounded p-2">
+                              <div className="text-xs text-blue-600 font-semibold">Total Time</div>
+                              <div className="text-sm font-bold text-blue-900">{totalHours.toFixed(1)} hrs</div>
+                            </div>
+                            <div className="bg-orange-50 rounded p-2">
+                              <div className="text-xs text-orange-600 font-semibold">Break Time</div>
+                              <div className="text-sm font-bold text-orange-900">{breakHours.toFixed(1)} hrs</div>
+                            </div>
+                            <div className="bg-green-50 rounded p-2">
+                              <div className="text-xs text-green-600 font-semibold">Work Hours</div>
+                              <div className="text-sm font-bold text-green-900">{workHours.toFixed(1)} hrs</div>
+                            </div>
+                          </>
+                        );
+                      })()}
                       <div className="bg-cyan-50 rounded p-2">
                         <div className="text-xs text-cyan-600 font-semibold">Required Count</div>
                         <div className="text-sm font-bold text-cyan-900">{role.required_count}</div>
@@ -295,6 +312,53 @@ const RoleManagement = () => {
                         </div>
                       )}
                     </div>
+
+                    {role.shifts && role.shifts.length > 0 && (
+                      <div className="mt-4 pt-4 border-t border-gray-200">
+                        <h4 className="text-sm font-semibold text-gray-900 mb-3">Shifts</h4>
+                        <div className="grid grid-cols-1 gap-3">
+                          {role.shifts.map(shift => (
+                            <div key={shift.id} className="border border-gray-200 rounded p-3 bg-gray-50">
+                              <div className="flex justify-between items-start mb-2">
+                                <div className="font-semibold text-sm text-gray-900">{shift.name}</div>
+                                <div className="text-xs text-gray-600">{shift.start_time} - {shift.end_time}</div>
+                              </div>
+
+                              <div className="grid grid-cols-3 gap-2">
+                                {(() => {
+                                  const [startH, startM] = shift.start_time.split(':').map(Number);
+                                  const [endH, endM] = shift.end_time.split(':').map(Number);
+                                  const shiftTotalHours = (endH + endM / 60) - (startH + startM / 60);
+                                  const breakHours = (role.break_minutes || 0) / 60;
+                                  const workHours = shiftTotalHours - breakHours;
+
+                                  return (
+                                    <>
+                                      <div className="bg-blue-100 rounded p-1.5">
+                                        <div className="text-xs text-blue-700 font-semibold">Total Time</div>
+                                        <div className="text-xs font-bold text-blue-900">{shiftTotalHours.toFixed(1)} hrs</div>
+                                      </div>
+                                      <div className="bg-orange-100 rounded p-1.5">
+                                        <div className="text-xs text-orange-700 font-semibold">Break</div>
+                                        <div className="text-xs font-bold text-orange-900">{breakHours.toFixed(1)} hrs</div>
+                                      </div>
+                                      <div className="bg-green-100 rounded p-1.5">
+                                        <div className="text-xs text-green-700 font-semibold">Work Hours</div>
+                                        <div className="text-xs font-bold text-green-900">{workHours.toFixed(1)} hrs</div>
+                                      </div>
+                                    </>
+                                  );
+                                })()}
+                              </div>
+
+                              <div className="text-xs text-gray-600 mt-2">
+                                <span className="text-gray-700 font-semibold">Employees:</span> {shift.min_emp} - {shift.max_emp}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   <div className="flex gap-2">

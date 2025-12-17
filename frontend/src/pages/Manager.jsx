@@ -7,10 +7,8 @@ import Card from '../components/common/Card';
 import Button from '../components/common/Button';
 import Modal from '../components/common/Modal';
 import Table from '../components/common/Table';
-import ManagerScheduleView from '../components/ManagerScheduleView';
 import RoleManagement from '../components/RoleManagement';
-import ShiftAssignmentWithDragDrop from '../components/ShiftAssignmentWithDragDrop';
-import ScheduleGenerator from '../components/ScheduleGenerator';
+import ScheduleManager from '../components/ScheduleManager';
 import api from '../services/api';
 import {
   listEmployees,
@@ -29,7 +27,8 @@ import {
   rejectLeave,
   sendMessage,
   getMessages,
-  deleteMessage
+  deleteMessage,
+  deleteShift
 } from '../services/api';
 import {
   Plus, Edit2, Trash2, AlertCircle, Clock, CheckCircle, XCircle, ChevronLeft,
@@ -142,11 +141,13 @@ const ManagerDashboardHome = ({ user }) => {
 
 const ManagerEmployees = ({ user }) => {
   const [employees, setEmployees] = useState([]);
+  const [roles, setRoles] = useState([]);
   const [showModal, setShowModal] = useState(false);
   const [editingEmployee, setEditingEmployee] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [showInactive, setShowInactive] = useState(false);
   const [formData, setFormData] = useState({
     first_name: '',
     last_name: '',
@@ -154,6 +155,8 @@ const ManagerEmployees = ({ user }) => {
     phone: '',
     address: '',
     password: '',
+    role_id: null,
+    hire_date: '',
     weekly_hours: 40,
     daily_max_hours: 8,
     shifts_per_week: 5,
@@ -161,8 +164,24 @@ const ManagerEmployees = ({ user }) => {
   });
 
   useEffect(() => {
-    loadEmployees();
-  }, []);
+    loadData();
+  }, [showInactive]);
+
+  const loadData = async () => {
+    try {
+      setLoading(true);
+      const [employeesRes, rolesRes] = await Promise.all([
+        api.get('/employees', { params: { show_inactive: showInactive } }),
+        listRoles()
+      ]);
+      setEmployees(employeesRes.data);
+      setRoles(rolesRes.data);
+    } catch (error) {
+      console.error('Failed to load data:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const loadEmployees = async () => {
     try {
@@ -170,8 +189,6 @@ const ManagerEmployees = ({ user }) => {
       setEmployees(response.data);
     } catch (error) {
       console.error('Failed to load employees:', error);
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -225,13 +242,15 @@ const ManagerEmployees = ({ user }) => {
           phone: '',
           address: '',
           password: '',
+          role_id: null,
+          hire_date: '',
           weekly_hours: 40,
           daily_max_hours: 8,
           shifts_per_week: 5,
           skills: []
         });
-        loadEmployees();
-        
+        loadData();  // ← Use loadData to respect showInactive filter
+
         // Clear success message after 3 seconds
         setTimeout(() => setSuccess(''), 3000);
       }
@@ -263,6 +282,8 @@ const ManagerEmployees = ({ user }) => {
       phone: employee.phone || '',
       address: employee.address || '',
       password: '',
+      role_id: employee.role_id || null,
+      hire_date: employee.hire_date || '',
       weekly_hours: employee.weekly_hours || 40,
       daily_max_hours: employee.daily_max_hours || 8,
       shifts_per_week: employee.shifts_per_week || 5,
@@ -271,13 +292,25 @@ const ManagerEmployees = ({ user }) => {
     setShowModal(true);
   };
 
-  const handleDelete = async (id) => {
-    if (window.confirm('Are you sure you want to delete this employee?')) {
+  const handleDelete = async (id, isInactive = false) => {
+    const employee = employees.find(e => e.id === id);
+    if (!employee) return;
+
+    let message = isInactive
+      ? 'Are you sure you want to PERMANENTLY DELETE this inactive employee? This cannot be undone.'
+      : 'Are you sure you want to delete this employee?';
+
+    if (window.confirm(message)) {
       try {
-        await deleteEmployee(id);
-        loadEmployees();
+        // For inactive employees, use hard delete. For active, use soft delete.
+        await deleteEmployee(id, isInactive);
+        const successMsg = isInactive ? '✅ Employee permanently deleted!' : '✅ Employee deleted successfully!';
+        setSuccess(successMsg);
+        setTimeout(() => setSuccess(''), 3000);
+        loadData();  // ← Use loadData to respect showInactive filter
       } catch (error) {
-        alert('Failed to delete employee');
+        setError('Failed to delete employee');
+        setTimeout(() => setError(''), 3000);
       }
     }
   };
@@ -308,8 +341,9 @@ const ManagerEmployees = ({ user }) => {
             <Edit2 className="w-4 h-4" />
           </button>
           <button
-            onClick={() => handleDelete(row.id)}
-            className="text-red-600 hover:text-red-800"
+            onClick={() => handleDelete(row.id, !row.is_active)}
+            className={`${!row.is_active ? 'text-red-700 hover:text-red-900' : 'text-red-600 hover:text-red-800'}`}
+            title={!row.is_active ? 'Permanently delete (hard delete)' : 'Soft delete (mark inactive)'}
           >
             <Trash2 className="w-4 h-4" />
           </button>
@@ -334,10 +368,21 @@ const ManagerEmployees = ({ user }) => {
           title="All Employees"
           subtitle={`${employees.length} total employees`}
           headerAction={
-            <Button onClick={() => { setEditingEmployee(null); setShowModal(true); }}>
-              <Plus className="w-4 h-4 mr-2 inline" />
-              Add Employee
-            </Button>
+            <div className="flex gap-2">
+              <label className="flex items-center gap-2 px-3 py-2 border border-gray-300 rounded-lg cursor-pointer hover:bg-gray-50">
+                <input
+                  type="checkbox"
+                  checked={showInactive}
+                  onChange={(e) => setShowInactive(e.target.checked)}
+                  className="w-4 h-4"
+                />
+                <span className="text-sm font-medium text-gray-700">Show Inactive</span>
+              </label>
+              <Button onClick={() => { setEditingEmployee(null); setShowModal(true); }}>
+                <Plus className="w-4 h-4 mr-2 inline" />
+                Add Employee
+              </Button>
+            </div>
           }
         >
           <Table columns={columns} data={employees} />
@@ -428,6 +473,32 @@ const ManagerEmployees = ({ user }) => {
                 <p className="text-xs text-gray-500 mt-1">Leave blank to keep the current password</p>
               )}
             </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Role (Optional)</label>
+                <select
+                  value={formData.role_id || ''}
+                  onChange={(e) => setFormData({ ...formData, role_id: e.target.value ? parseInt(e.target.value) : null })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                >
+                  <option value="">Select a role</option>
+                  {roles.map((role) => (
+                    <option key={role.id} value={role.id}>
+                      {role.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Hire Date (Optional)</label>
+                <input
+                  type="date"
+                  value={formData.hire_date}
+                  onChange={(e) => setFormData({ ...formData, hire_date: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                />
+              </div>
+            </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Phone</label>
               <input
@@ -506,23 +577,51 @@ const ManagerRoles = ({ user }) => {
   const [editingShift, setEditingShift] = useState(null); // null or shift id being edited
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [archivedError, setArchivedError] = useState('');
+  const [showArchivedShifts, setShowArchivedShifts] = useState(false);
+  const [archivedShifts, setArchivedShifts] = useState([]);
+  const [loadingArchived, setLoadingArchived] = useState(false);
   const [roleForm, setRoleForm] = useState({
     name: '',
     description: '',
-    required_skills: []
+    priority: 50,
+    priority_percentage: 50,
+    break_minutes: 60,
+    weekend_required: false,
+    required_skills: [],
+    schedule_config: {
+      monday: true,
+      tuesday: true,
+      wednesday: true,
+      thursday: true,
+      friday: true,
+      saturday: false,
+      sunday: false
+    }
   });
+  const days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
   const [shiftForm, setShiftForm] = useState({
     name: '',
     start_time: '09:00',
     end_time: '17:00',
     min_emp: 1,
     max_emp: 5,
-    priority: 50
+    priority: 50,
+    schedule_config: {}
   });
 
   useEffect(() => {
     loadRoles();
   }, []);
+
+  useEffect(() => {
+    if (showArchivedShifts && selectedRole?.id) {
+      loadArchivedShifts(selectedRole.id);
+    } else {
+      setArchivedShifts([]);
+      setArchivedError('');
+    }
+  }, [showArchivedShifts, selectedRole]);
 
   const loadRoles = async () => {
     try {
@@ -555,12 +654,41 @@ const ManagerRoles = ({ user }) => {
     }
   };
 
+  const loadArchivedShifts = async (roleId) => {
+    if (!roleId) return;
+    try {
+      setLoadingArchived(true);
+      setArchivedError('');
+      const response = await listShifts(roleId, true);
+      const inactiveShifts = (response.data || []).filter(shift => !shift.is_active);
+      setArchivedShifts(inactiveShifts);
+    } catch (error) {
+      console.error('Failed to load archived shifts:', error);
+      setArchivedError(error.response?.data?.detail || 'Failed to load archived shifts');
+    } finally {
+      setLoadingArchived(false);
+    }
+  };
+
   const openEditRole = async (role) => {
     setEditingRole(role.id);
     setRoleForm({
       name: role.name,
       description: role.description || '',
-      required_skills: role.required_skills || []
+      priority: role.priority || 50,
+      priority_percentage: role.priority_percentage || 50,
+      break_minutes: role.break_minutes || 60,
+      weekend_required: role.weekend_required || false,
+      required_skills: role.required_skills || [],
+      schedule_config: role.schedule_config || {
+        monday: true,
+        tuesday: true,
+        wednesday: true,
+        thursday: true,
+        friday: true,
+        saturday: false,
+        sunday: false
+      }
     });
     setShowRoleModal(true);
   };
@@ -573,7 +701,8 @@ const ManagerRoles = ({ user }) => {
       end_time: shift.end_time,
       min_emp: shift.min_emp || 1,
       max_emp: shift.max_emp || 5,
-      priority: shift.priority || 50
+      priority: shift.priority || 50,
+      schedule_config: shift.schedule_config || {}
     });
     setShowShiftModal(true);
   };
@@ -595,7 +724,24 @@ const ManagerRoles = ({ user }) => {
         });
       }
       setShowRoleModal(false);
-      setRoleForm({ name: '', description: '', required_skills: [] });
+      setRoleForm({
+        name: '',
+        description: '',
+        priority: 50,
+        priority_percentage: 50,
+        break_minutes: 60,
+        weekend_required: false,
+        required_skills: [],
+        schedule_config: {
+          monday: true,
+          tuesday: true,
+          wednesday: true,
+          thursday: true,
+          friday: true,
+          saturday: false,
+          sunday: false
+        }
+      });
       loadRoles();
     } catch (err) {
       setError(err.response?.data?.detail || 'Failed to save role');
@@ -629,7 +775,7 @@ const ManagerRoles = ({ user }) => {
         min_emp: parseInt(shiftForm.min_emp) || 1,
         max_emp: parseInt(shiftForm.max_emp) || 5,
         priority: parseInt(shiftForm.priority) || 50,
-        schedule_config: {}
+        schedule_config: shiftForm.schedule_config || {}
       };
 
       console.log('Submitting shift:', shiftData, 'Role ID:', selectedRole?.id);
@@ -657,7 +803,8 @@ const ManagerRoles = ({ user }) => {
         end_time: '17:00',
         min_emp: 1,
         max_emp: 5,
-        priority: 50
+        priority: 50,
+        schedule_config: {}
       });
 
       // Reload roles to show new shift
@@ -678,6 +825,9 @@ const ManagerRoles = ({ user }) => {
       setDeleteTarget(null);
       if (selectedRole?.id === roleId) {
         setSelectedRole(null);
+        setShowArchivedShifts(false);
+        setArchivedShifts([]);
+        setArchivedError('');
       }
       loadRoles();
     } catch (err) {
@@ -685,15 +835,27 @@ const ManagerRoles = ({ user }) => {
     }
   };
 
-  const handleDeleteShift = async (shiftId) => {
-    setError('');
+  const handleDeleteShift = async (shiftId, hardDelete = false) => {
+    if (hardDelete) {
+      setArchivedError('');
+    } else {
+      setError('');
+    }
     try {
-      await api.delete(`/shifts/${shiftId}`);
+      await deleteShift(shiftId, hardDelete);
       setShowDeleteConfirm(null);
       setDeleteTarget(null);
-      loadRoles();
+      await loadRoles();
+      if (hardDelete && selectedRole?.id) {
+        await loadArchivedShifts(selectedRole.id);
+      }
     } catch (err) {
-      setError(err.response?.data?.detail || 'Failed to delete shift');
+      const message = err.response?.data?.detail || 'Failed to delete shift';
+      if (hardDelete) {
+        setArchivedError(message);
+      } else {
+        setError(message);
+      }
     }
   };
 
@@ -723,6 +885,9 @@ const ManagerRoles = ({ user }) => {
                 <div
                   key={role.id}
                   onClick={async () => {
+                    setShowArchivedShifts(false);
+                    setArchivedShifts([]);
+                    setArchivedError('');
                     try {
                       console.log('Loading role details for:', role.id);
                       const res = await api.get(`/roles/${role.id}`);
@@ -785,16 +950,29 @@ const ManagerRoles = ({ user }) => {
                     <div className="mt-4 pt-4 border-t border-gray-300 space-y-3">
                       <div className="flex items-center justify-between">
                         <p className="text-sm font-medium text-gray-700">Shifts ({role.shifts?.length || 0}):</p>
-                        <Button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setShowShiftModal(true);
-                          }}
-                          className="bg-green-500 hover:bg-green-600 text-white px-3 py-1 text-sm"
-                        >
-                          <Plus className="w-3 h-3 mr-1 inline" />
-                          Add Shift
-                        </Button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setShowArchivedShifts(prev => !prev);
+                            }}
+                            className={`text-xs px-3 py-1 rounded border ${
+                              showArchivedShifts ? 'border-blue-500 text-blue-600 bg-blue-50' : 'border-gray-300 text-gray-600 bg-white'
+                            }`}
+                          >
+                            {showArchivedShifts ? 'Hide Archived' : 'View Archived'}
+                          </button>
+                          <Button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setShowShiftModal(true);
+                            }}
+                            className="bg-green-500 hover:bg-green-600 text-white px-3 py-1 text-sm"
+                          >
+                            <Plus className="w-3 h-3 mr-1 inline" />
+                            Add Shift
+                          </Button>
+                        </div>
                       </div>
 
                       {role.shifts && role.shifts.length > 0 ? (
@@ -826,7 +1004,7 @@ const ManagerRoles = ({ user }) => {
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      setDeleteTarget({ type: 'shift', id: shift.id, name: shift.name });
+                                      setDeleteTarget({ type: 'shift', id: shift.id, name: shift.name, hardDelete: false });
                                       setShowDeleteConfirm('shift');
                                     }}
                                     className="p-2 text-red-600 hover:bg-red-100 rounded"
@@ -842,6 +1020,48 @@ const ManagerRoles = ({ user }) => {
                       ) : (
                         <p className="text-sm text-gray-500 ml-4 italic">No shifts yet. Click "Add Shift" to create one.</p>
                       )}
+
+                      {showArchivedShifts && (
+                        <div className="mt-4 p-3 border border-dashed border-gray-300 rounded bg-gray-50">
+                          <div className="flex items-center justify-between mb-2">
+                            <p className="text-sm font-medium text-gray-700">
+                              Archived Shifts ({archivedShifts.length})
+                            </p>
+                            {loadingArchived && <span className="text-xs text-gray-500">Loading...</span>}
+                          </div>
+                          {archivedError && (
+                            <div className="mb-2 p-2 bg-red-50 border border-red-200 rounded text-sm text-red-600">
+                              {archivedError}
+                            </div>
+                          )}
+                          {!loadingArchived && archivedShifts.length === 0 && (
+                            <p className="text-sm text-gray-500 italic">No archived shifts for this role.</p>
+                          )}
+                          {!loadingArchived && archivedShifts.length > 0 && (
+                            <div className="space-y-2">
+                              {archivedShifts.map(shift => (
+                                <div key={shift.id} className="p-3 bg-white border border-gray-200 rounded flex items-center justify-between">
+                                  <div>
+                                    <p className="font-medium text-gray-800">{shift.name}</p>
+                                    <p className="text-sm text-gray-600">{shift.start_time} - {shift.end_time}</p>
+                                    <p className="text-xs text-gray-500 mt-1">Capacity: {shift.min_emp}-{shift.max_emp} employees</p>
+                                  </div>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setDeleteTarget({ type: 'shift', id: shift.id, name: shift.name, hardDelete: true });
+                                      setShowDeleteConfirm('shift');
+                                    }}
+                                    className="text-sm text-red-600 hover:bg-red-50 px-3 py-1 rounded border border-red-200"
+                                  >
+                                    Delete Permanently
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -856,7 +1076,24 @@ const ManagerRoles = ({ user }) => {
           onClose={() => {
             setShowRoleModal(false);
             setEditingRole(null);
-            setRoleForm({ name: '', description: '', required_skills: [] });
+            setRoleForm({
+              name: '',
+              description: '',
+              priority: 50,
+              priority_percentage: 50,
+              break_minutes: 60,
+              weekend_required: false,
+              required_skills: [],
+              schedule_config: {
+                monday: true,
+                tuesday: true,
+                wednesday: true,
+                thursday: true,
+                friday: true,
+                saturday: false,
+                sunday: false
+              }
+            });
           }}
           title={editingRole ? `Edit Role: ${roleForm.name}` : "Create New Job Role"}
           footer={
@@ -864,7 +1101,24 @@ const ManagerRoles = ({ user }) => {
               <Button variant="outline" onClick={() => {
                 setShowRoleModal(false);
                 setEditingRole(null);
-                setRoleForm({ name: '', description: '', required_skills: [] });
+                setRoleForm({
+                  name: '',
+                  description: '',
+                  priority: 50,
+                  priority_percentage: 50,
+                  break_minutes: 60,
+                  weekend_required: false,
+                  required_skills: [],
+                  schedule_config: {
+                    monday: true,
+                    tuesday: true,
+                    wednesday: true,
+                    thursday: true,
+                    friday: true,
+                    saturday: false,
+                    sunday: false
+                  }
+                });
               }}>
                 Cancel
               </Button>
@@ -902,6 +1156,52 @@ const ManagerRoles = ({ user }) => {
                 placeholder="Describe this job role..."
               />
             </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Priority (1-100)</label>
+                <input
+                  type="number"
+                  min="1"
+                  max="100"
+                  value={roleForm.priority}
+                  onChange={(e) => setRoleForm({ ...roleForm, priority: parseInt(e.target.value) })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Priority % (1-100)</label>
+                <input
+                  type="number"
+                  min="1"
+                  max="100"
+                  value={roleForm.priority_percentage}
+                  onChange={(e) => setRoleForm({ ...roleForm, priority_percentage: parseInt(e.target.value) })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Break Minutes</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="5"
+                  value={roleForm.break_minutes}
+                  onChange={(e) => setRoleForm({ ...roleForm, break_minutes: parseInt(e.target.value) })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                />
+              </div>
+              <div className="flex items-end">
+                <label className="flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={roleForm.weekend_required}
+                    onChange={(e) => setRoleForm({ ...roleForm, weekend_required: e.target.checked })}
+                    className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-2 focus:ring-blue-500"
+                  />
+                  <span className="ml-2 text-sm font-medium text-gray-700">Weekend Required</span>
+                </label>
+              </div>
+            </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Required Skills (comma-separated)</label>
               <input
@@ -914,6 +1214,28 @@ const ManagerRoles = ({ user }) => {
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
                 placeholder="e.g., Java, Python, SQL"
               />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-3">Operating Days</label>
+              <div className="grid grid-cols-4 gap-3">
+                {days.map((day) => (
+                  <label key={day} className="flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={roleForm.schedule_config[day] || false}
+                      onChange={(e) => setRoleForm({
+                        ...roleForm,
+                        schedule_config: {
+                          ...roleForm.schedule_config,
+                          [day]: e.target.checked
+                        }
+                      })}
+                      className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-2 focus:ring-blue-500"
+                    />
+                    <span className="ml-2 text-sm text-gray-700 capitalize">{day}</span>
+                  </label>
+                ))}
+              </div>
             </div>
           </form>
         </Modal>
@@ -930,7 +1252,8 @@ const ManagerRoles = ({ user }) => {
               end_time: '17:00',
               min_emp: 1,
               max_emp: 5,
-              priority: 50
+              priority: 50,
+              schedule_config: {}
             });
           }}
           title={editingShift ? `Edit Shift: ${shiftForm.name}` : `Create Shift for ${selectedRole?.name || 'Role'}`}
@@ -945,7 +1268,8 @@ const ManagerRoles = ({ user }) => {
                   end_time: '17:00',
                   min_emp: 1,
                   max_emp: 5,
-                  priority: 50
+                  priority: 50,
+                  schedule_config: {}
                 });
               }}>
                 Cancel
@@ -1053,10 +1377,11 @@ const ManagerRoles = ({ user }) => {
               </Button>
               <Button
                 onClick={() => {
+                  if (!deleteTarget) return;
                   if (deleteTarget.type === 'role') {
                     handleDeleteRole(deleteTarget.id);
                   } else if (deleteTarget.type === 'shift') {
-                    handleDeleteShift(deleteTarget.id);
+                    handleDeleteShift(deleteTarget.id, deleteTarget.hardDelete);
                   }
                 }}
                 className="bg-red-600 hover:bg-red-700"
@@ -1067,10 +1392,12 @@ const ManagerRoles = ({ user }) => {
           }
         >
           <div className="space-y-4">
-            {error && (
+            {(deleteTarget?.type === 'shift' && deleteTarget?.hardDelete ? archivedError : error) && (
               <div className="p-3 bg-red-50 border border-red-200 rounded-lg flex items-start">
                 <AlertCircle className="w-5 h-5 text-red-500 mr-2 flex-shrink-0 mt-0.5" />
-                <span className="text-sm text-red-700">{error}</span>
+                <span className="text-sm text-red-700">
+                  {deleteTarget?.type === 'shift' && deleteTarget?.hardDelete ? archivedError : error}
+                </span>
               </div>
             )}
             <p className="text-gray-700">
@@ -1079,7 +1406,9 @@ const ManagerRoles = ({ user }) => {
             <p className="text-sm text-gray-600">
               {deleteTarget?.type === 'role'
                 ? 'All shifts under this role will be marked as inactive.'
-                : 'This shift will be marked as inactive.'}
+                : deleteTarget?.hardDelete
+                  ? 'This archived shift will be permanently removed from the system.'
+                  : 'This shift will be marked as inactive.'}
             </p>
           </div>
         </Modal>
@@ -1089,19 +1418,9 @@ const ManagerRoles = ({ user }) => {
 };
 
 const ManagerSchedules = ({ user }) => {
-  const [activeTab, setActiveTab] = useState('calendar');
   const [employees, setEmployees] = useState([]);
   const [roles, setRoles] = useState([]);
-  const [schedules, setSchedules] = useState({});
-  const [leaveRequests, setLeaveRequests] = useState({});
-  const [unavailability, setUnavailability] = useState({});
   const [loading, setLoading] = useState(true);
-  const [showScheduleGenerator, setShowScheduleGenerator] = useState(false);
-  const [regenerating, setRegenerating] = useState(false);
-  const [scheduleRange, setScheduleRange] = useState({
-    start: format(new Date(), 'yyyy-MM-dd'),
-    end: format(new Date(new Date().getTime() + 30 * 24 * 60 * 60 * 1000), 'yyyy-MM-dd')
-  });
 
   useEffect(() => {
     loadData();
@@ -1110,86 +1429,17 @@ const ManagerSchedules = ({ user }) => {
   const loadData = async () => {
     try {
       setLoading(true);
-      const token = localStorage.getItem('token');
-
-      const [empRes, rolesRes, schedRes, leaveRes, unavailRes] = await Promise.all([
+      const [empRes, rolesRes] = await Promise.all([
         listEmployees(),
-        listRoles(),
-        getSchedules(),
-        listLeaveRequests(),
-        fetch('http://localhost:8000/unavailability', {
-          headers: { Authorization: `Bearer ${token}` }
-        })
+        listRoles()
       ]);
 
-      // Handle axios response format (returns response.data)
-      const empData = empRes?.data || [];
-      const rolesData = rolesRes?.data || [];
-      const schedData = schedRes?.data || [];
-      const leaveData = leaveRes?.data || [];
-
-      setEmployees(empData);
-      setRoles(rolesData);
-      
-      // Transform schedules
-      const schedByDate = {};
-      if (schedData && Array.isArray(schedData)) {
-        schedData.forEach(sched => {
-          const dateStr = format(new Date(sched.date), 'yyyy-MM-dd');
-          if (!schedByDate[dateStr]) schedByDate[dateStr] = {};
-          if (!schedByDate[dateStr][sched.employee_id]) {
-            schedByDate[dateStr][sched.employee_id] = [];
-          }
-          schedByDate[dateStr][sched.employee_id].push(sched);
-        });
-      }
-      setSchedules(schedByDate);
-
-      // Transform leaves
-      const leavesByKey = {};
-      if (leaveData && Array.isArray(leaveData)) {
-        leaveData.forEach(leave => {
-          if (leave.status === 'approved') {
-            leavesByKey[`${leave.employee_id}-${leave.start_date}`] = leave;
-          }
-        });
-      }
-      setLeaveRequests(leavesByKey);
-
-      // Transform unavailability
-      const unavailData = await unavailRes.json();
-      const unavailByKey = {};
-      if (Array.isArray(unavailData)) {
-        unavailData.forEach(unavail => {
-          unavailByKey[`${unavail.employee_id}-${unavail.date}`] = unavail;
-        });
-      }
-      setUnavailability(unavailByKey);
+      setEmployees(empRes?.data || []);
+      setRoles(rolesRes?.data || []);
     } catch (err) {
       console.error('Failed to load data:', err);
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleRegenerateSchedule = async () => {
-    try {
-      setRegenerating(true);
-      console.log('Regenerating schedule for:', scheduleRange.start, 'to', scheduleRange.end);
-      
-      const response = await generateSchedules(scheduleRange.start, scheduleRange.end);
-      console.log('Regenerate response:', response);
-      
-      // Reload data to get updated schedules
-      await loadData();
-      
-      alert('✅ Schedule regenerated successfully! Changes from leaves, drag-drop assignments, and role updates have been applied.');
-    } catch (err) {
-      console.error('Failed to regenerate schedule:', err);
-      const detail = err.response?.data?.detail || err.message;
-      alert('❌ Failed to regenerate schedule: ' + detail);
-    } finally {
-      setRegenerating(false);
     }
   };
 
@@ -1205,97 +1455,10 @@ const ManagerSchedules = ({ user }) => {
     <div>
       <Header title="Schedule Management" subtitle="View, create, and manage employee schedules" />
       <div className="p-6">
-        {/* Tabs */}
-        <div className="flex gap-2 mb-6 border-b border-gray-200">
-          <button
-            onClick={() => setActiveTab('calendar')}
-            className={`px-4 py-3 font-medium border-b-2 transition ${
-              activeTab === 'calendar'
-                ? 'border-blue-600 text-blue-600'
-                : 'border-transparent text-gray-600 hover:text-gray-900'
-            }`}
-          >
-            <Calendar className="inline mr-2" size={18} />
-            Calendar View
-          </button>
-          <button
-            onClick={() => setActiveTab('assignment')}
-            className={`px-4 py-3 font-medium border-b-2 transition ${
-              activeTab === 'assignment'
-                ? 'border-blue-600 text-blue-600'
-                : 'border-transparent text-gray-600 hover:text-gray-900'
-            }`}
-          >
-            <Users className="inline mr-2" size={18} />
-            Shift Assignment
-          </button>
-          <button
-            onClick={() => setShowScheduleGenerator(true)}
-            className="ml-auto px-4 py-3 font-medium text-blue-600 hover:bg-blue-50 rounded-lg flex items-center gap-2"
-          >
-            <Sparkles size={18} />
-            Generate Schedule
-          </button>
-          <button
-            onClick={handleRegenerateSchedule}
-            disabled={regenerating}
-            className="px-4 py-3 font-medium text-green-600 hover:bg-green-50 rounded-lg flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <Sparkles size={18} />
-            {regenerating ? 'Regenerating...' : 'Regenerate'}
-          </button>
-        </div>
-
-        {/* Schedule Generator Modal */}
-        {showScheduleGenerator && (
-          <ScheduleGenerator 
-            onSuccess={() => {
-              loadData();
-              setShowScheduleGenerator(false);
-            }}
-            onClose={() => setShowScheduleGenerator(false)}
-          />
-        )}
-
-        {/* Tab Content */}
-        {activeTab === 'calendar' && (
-          <div>
-            <div className="mb-4">
-              <button
-                onClick={handleRegenerateSchedule}
-                disabled={regenerating}
-                className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-              >
-                <Sparkles size={18} />
-                {regenerating ? 'Regenerating...' : 'Regenerate Schedule'}
-              </button>
-            </div>
-            <ManagerScheduleView user={user} />
-          </div>
-        )}
-
-        {activeTab === 'assignment' && (
-          <div>
-            <div className="mb-4">
-              <button
-                onClick={handleRegenerateSchedule}
-                disabled={regenerating}
-                className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-              >
-                <Sparkles size={18} />
-                {regenerating ? 'Regenerating...' : 'Regenerate Schedule'}
-              </button>
-            </div>
-            <ShiftAssignmentWithDragDrop
-              employees={employees}
-              roles={roles}
-              schedules={schedules}
-              leaveRequests={leaveRequests}
-              unavailability={unavailability}
-              onShiftAssigned={() => loadData()}
-            />
-          </div>
-        )}
+        <ScheduleManager
+          employees={employees}
+          roles={roles}
+        />
       </div>
     </div>
   );
